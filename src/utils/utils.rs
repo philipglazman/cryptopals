@@ -28,7 +28,7 @@ fn from_hex(s: &str) -> Result<Vec<u8>, hex::FromHexError> {
     hex::decode(s)
 }
 
-fn from_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+pub fn from_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     base64::decode(s)
 }
 
