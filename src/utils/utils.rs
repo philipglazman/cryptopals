@@ -162,6 +162,22 @@ fn u32_hamming_distance(a: u32, b: u32) -> u32 {
     return counter;
 }
 
+// https://datatracker.ietf.org/doc/html/rfc2315
+pub fn pkcs7_padding(value: &[u8]) -> Vec<u8> {
+    // pad the input at the trailing end with k - (l mod k) octets all having value k - (l mod k),
+    // where l is the length of the input
+    let l: usize = value.len() * 8;
+    let k: usize = value.len() / 4;
+    let padding = k - (l % k);
+
+    let mut result = Vec::from(value);
+
+    for _ in 0..padding {
+        result.push(padding as u8);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +272,15 @@ mod tests {
         let buf = from_base64(&body).unwrap();
         let key = crack_repeating_xor(buf);
         assert_eq!("Terminator X: Bring the noise".as_bytes(), key);
+    }
+
+    #[test]
+    fn pkcs7_padding_challenge() {
+        // Implement PKCS#7 padding
+        // https://cryptopals.com/sets/2/challenges/9
+        assert_eq!(
+            "YELLOW SUBMARINE\x04\x04\x04\x04".as_bytes(),
+            pkcs7_padding("YELLOW SUBMARINE".as_bytes())
+        );
     }
 }
