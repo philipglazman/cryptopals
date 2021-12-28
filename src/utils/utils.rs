@@ -24,7 +24,7 @@ impl XOR for [u8] {
     }
 }
 
-fn from_hex(s: &str) -> Result<Vec<u8>, hex::FromHexError> {
+pub fn from_hex(s: &str) -> Result<Vec<u8>, hex::FromHexError> {
     hex::decode(s)
 }
 
