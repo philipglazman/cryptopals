@@ -162,20 +162,20 @@ fn u32_hamming_distance(a: u32, b: u32) -> u32 {
     return counter;
 }
 
-// https://datatracker.ietf.org/doc/html/rfc2315
-pub fn pkcs7_padding(value: &[u8]) -> Vec<u8> {
-    // pad the input at the trailing end with k - (l mod k) octets all having value k - (l mod k),
-    // where l is the length of the input
-    let l: usize = value.len() * 8;
-    let k: usize = value.len() / 4;
-    let padding = k - (l % k);
+pub trait Padding {
+    fn pad(&mut self, k: u8);
+}
 
-    let mut result = Vec::from(value);
+impl Padding for Vec<u8> {
+    // https://www.rfc-editor.org/rfc/rfc5652.html
+    fn pad(&mut self, k: u8) {
+        let l: usize = self.len();
+        let padding = k - (l % k as usize) as u8;
 
-    for _ in 0..padding {
-        result.push(padding as u8);
+        for _ in 0..padding {
+            self.push(padding);
+        }
     }
-    result
 }
 
 #[cfg(test)]
@@ -278,9 +278,8 @@ mod tests {
     fn pkcs7_padding_challenge() {
         // Implement PKCS#7 padding
         // https://cryptopals.com/sets/2/challenges/9
-        assert_eq!(
-            "YELLOW SUBMARINE\x04\x04\x04\x04".as_bytes(),
-            pkcs7_padding("YELLOW SUBMARINE".as_bytes())
-        );
+        let mut res = Vec::from("YELLOW SUBMARINE");
+        res.pad(20);
+        assert_eq!("YELLOW SUBMARINE\x04\x04\x04\x04".as_bytes(), res);
     }
 }
