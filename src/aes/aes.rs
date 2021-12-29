@@ -1,92 +1,114 @@
+use std::vec;
+
 // challenge 7
-use crate::utils;
 use crate::utils::XOR;
-use openssl::symm::{Cipher, Crypter, Mode};
+use crate::utils::{self, Padding};
+use openssl::symm::{decrypt, encrypt, Cipher};
 
-fn decrypt_aes_128_ecb(ciphertext: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut decrypter = Crypter::new(Cipher::aes_128_ecb(), Mode::Decrypt, key, None).unwrap();
+fn encrypt_aes_block(block: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
+    if block.len() != 16 {
+        return Err(Error::InvalidBlockLength);
+    }
 
-    let mut res = vec![0; ciphertext.len() + Cipher::aes_128_ecb().block_size()];
-
-    let mut count = ciphertext
-        .chunks(Cipher::aes_128_ecb().block_size())
-        .fold(0, |count, block| {
-            count + decrypter.update(&block, &mut res[count..]).unwrap()
-        });
-
-    count += decrypter.finalize(&mut res[count..]).unwrap();
-    res.truncate(count);
-    res
+    let mut result = encrypt(Cipher::aes_128_ecb(), key, None, &block).unwrap();
+    result.truncate(16);
+    Ok(result)
 }
 
-fn encrypt_aes_128_ecb(plaintext: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut encrypter = Crypter::new(Cipher::aes_128_ecb(), Mode::Encrypt, key, None).unwrap();
+fn decrypt_aes_block(block: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
+    if block.len() != 16 {
+        return Err(Error::InvalidBlockLength);
+    }
 
-    let mut res = vec![0; plaintext.len() + Cipher::aes_128_ecb().block_size()];
+    let padding = encrypt_aes_block(&[16 as u8; 16], key);
+    let mut input = block.to_vec();
+    input.extend_from_slice(&padding?);
 
-    let mut count = plaintext
-        .chunks(Cipher::aes_128_ecb().block_size())
-        .fold(0, |count, block| {
-            count + encrypter.update(&block, &mut res[count..]).unwrap()
-        });
-
-    count += encrypter.finalize(&mut res[count..]).unwrap();
-    res.truncate(count);
-    res
+    let result = decrypt(Cipher::aes_128_ecb(), key, None, &input).unwrap();
+    Ok(result)
 }
 
-fn decrypt_aes_128_cbc(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
-    // Use ECB under the hood.
-    // CBC chains blocks using the previous block as IV.
-    // We will use ECB where the input is block_n xor block_n-1.
-    let mut input = iv.to_vec();
-    input.extend_from_slice(ciphertext);
-    let ciphertext = input;
+fn decrypt_aes_128_ecb(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut plaintext = ciphertext
+        .chunks(16)
+        .try_fold(vec![], |mut plaintext, block| {
+            plaintext.extend_from_slice(&decrypt_aes_block(block, key)?);
+            Ok(plaintext)
+        })?;
 
-    let cipher_iter = ciphertext.chunks(Cipher::aes_128_cbc().block_size());
+    plaintext.unpad_inplace();
 
-    (&cipher_iter)
-        .clone()
-        .skip(1)
-        .zip(cipher_iter)
-        .fold(vec![0u8], |mut res, (first, last)| {
-            let mut block: Vec<u8> = Vec::new();
-            block = first.to_vec();
-            block.extend_from_slice(&encrypt_aes_128_ecb(
-                &vec![
-                    Cipher::aes_128_cbc().block_size() as u8,
-                    Cipher::aes_128_cbc().block_size() as u8,
-                ],
-                key,
-            ));
-            let decrypted_block = decrypt_aes_128_ecb(&block, key).xor(last);
-            res.extend_from_slice(&decrypted_block);
-            res
-        })
+    Ok(plaintext)
 }
 
-fn encrypt_aes_128_cbc(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
-    let mut input = iv.to_vec();
-    input.extend_from_slice(plaintext);
-    let plaintext = input;
+fn encrypt_aes_128_ecb(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
+    // Pad the plaintext.
+    let mut input = plaintext.to_vec().pad(16);
 
-    let iter = plaintext.chunks(Cipher::aes_128_cbc().block_size());
+    let ciphertext = input.chunks(16).try_fold(vec![], |mut ciphertext, block| {
+        ciphertext.extend_from_slice(&encrypt_aes_block(block, key)?);
+        Ok(ciphertext)
+    })?;
 
-    (&iter)
-        .clone()
-        .skip(1)
-        .zip(iter)
-        .fold(vec![0u8], |mut res, (first, last)| {
-            let block = encrypt_aes_128_ecb(&first.xor(&last), key);
+    Ok(ciphertext)
+}
+
+fn decrypt_aes_128_cbc(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
+    if ciphertext.len() % 16 != 0 {
+        return Err(Error::InvalidBlockLength);
+    }
+
+    if iv.len() != 16 {
+        return Err(Error::InvalidIVLength);
+    }
+
+    let prev: Vec<u8> = iv.to_vec();
+
+    let mut plaintext =
+        ciphertext
+            .chunks(16)
+            .try_fold((vec![], prev), |(mut res, mut prev), block| {
+                res.extend_from_slice(&decrypt_aes_block(&block, key)?.xor(&prev));
+                prev = block.to_vec();
+                Ok((res, prev))
+            })?;
+
+    plaintext.0.unpad_inplace();
+    Ok(plaintext.0)
+}
+
+fn encrypt_aes_128_cbc(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
+    if iv.len() != 16 {
+        return Err(Error::InvalidIVLength);
+    }
+
+    // Padding
+    let plaintext = plaintext.to_vec().pad(16);
+
+    let prev: Vec<u8> = iv.to_vec();
+
+    let res = plaintext
+        .chunks(16)
+        .try_fold((vec![], prev), |(mut res, mut prev), block| {
+            let block = encrypt_aes_block(&block.xor(&prev), key)?;
             res.extend_from_slice(&block);
-            res
-        })
+            prev = block;
+            Ok((res, prev))
+        })?;
+
+    Ok(res.0)
+}
+
+#[derive(Debug, Clone)]
+pub enum Error {
+    InvalidIVLength,
+    InvalidBlockLength,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils;
+    use crate::utils::{self, Padding};
     use std::io::BufRead;
 
     #[test]
@@ -98,7 +120,7 @@ mod tests {
         let body = std::fs::read_to_string(d).unwrap();
         let buf = utils::from_base64(&body).unwrap();
         let key = b"YELLOW SUBMARINE";
-        let res = decrypt_aes_128_ecb(&buf, key);
+        let res = decrypt_aes_128_ecb(&buf, key).unwrap();
         let plaintext = "I\'m back and I\'m ringin\' the bell \nA rockin\' on the mike while the fly girls yell \nIn ecstasy in the back of me \nWell that\'s my DJ Deshay cuttin\' all them Z\'s \nHittin\' hard and the girlies goin\' crazy \nVanilla\'s on the mike, man I\'m not lazy. \n\nI\'m lettin\' my drug kick in \nIt controls my mouth and I begin \nTo just let it flow, let my concepts go \nMy posse\'s to the side yellin\', Go Vanilla Go! \n\nSmooth \'cause that\'s the way I will be \nAnd if you don\'t give a damn, then \nWhy you starin\' at me \nSo get off \'cause I control the stage \nThere\'s no dissin\' allowed \nI\'m in my own phase \nThe girlies sa y they love me and that is ok \nAnd I can dance better than any kid n\' play \n\nStage 2 -- Yea the one ya\' wanna listen to \nIt\'s off my head so let the beat play through \nSo I can funk it up and make it sound good \n1-2-3 Yo -- Knock on some wood \nFor good luck, I like my rhymes atrocious \nSupercalafragilisticexpialidocious \nI\'m an effect and that you can bet \nI can take a fly girl and make her wet. \n\nI\'m like Samson -- Samson to Delilah \nThere\'s no denyin\', You can try to hang \nBut you\'ll keep tryin\' to get my style \nOver and over, practice makes perfect \nBut not if you\'re a loafer. \n\nYou\'ll get nowhere, no place, no time, no girls \nSoon -- Oh my God, homebody, you probably eat \nSpaghetti with a spoon! Come on and say it! \n\nVIP. Vanilla Ice yep, yep, I\'m comin\' hard like a rhino \nIntoxicating so you stagger like a wino \nSo punks stop trying and girl stop cryin\' \nVanilla Ice is sellin\' and you people are buyin\' \n\'Cause why the freaks are jockin\' like Crazy Glue \nMovin\' and groovin\' trying to sing along \nAll through the ghetto groovin\' this here song \nNow you\'re amazed by the VIP posse. \n\nSteppin\' so hard like a German Nazi \nStartled by the bases hittin\' ground \nThere\'s no trippin\' on mine, I\'m just gettin\' down \nSparkamatic, I\'m hangin\' tight like a fanatic \nYou trapped me once and I thought that \nYou might have it \nSo step down and lend me your ear \n\'89 in my time! You, \'90 is my year. \n\nYou\'re weakenin\' fast, YO! and I can tell it \nYour body\'s gettin\' hot, so, so I can smell it \nSo don\'t be mad and don\'t be sad \n\'Cause the lyrics belong to ICE, You can call me Dad \nYou\'re pitchin\' a fit, so step back and endure \nLet the witch doctor, Ice, do the dance to cure \nSo come up close and don\'t be square \nYou wanna battle me -- Anytime, anywhere \n\nYou thought that I was weak, Boy, you\'re dead wrong \nSo come on, everybody and sing this song \n\nSay -- Play that funky music Say, go white boy, go white boy go \nplay that funky music Go white boy, go white boy, go \nLay down and boogie and play that funky music till you die. \n\nPlay that funky music Come on, Come on, let me hear \nPlay that funky music white boy you say it, say it \nPlay that funky music A little louder now \nPlay that funky music, white boy Come on, Come on, Come on \nPlay that funky music \n";
         assert_eq!(plaintext.as_bytes(), res);
     }
@@ -110,19 +132,24 @@ mod tests {
         let key = Vec::from("YELLOW SUBMARINE");
         assert_eq!(
             plaintext,
-            decrypt_aes_128_ecb(&encrypt_aes_128_ecb(&plaintext, &key), &key)
+            decrypt_aes_128_ecb(&encrypt_aes_128_ecb(&plaintext, &key).unwrap(), &key).unwrap()
         );
     }
 
     #[test]
     fn aes_cbc() {
         // Test AES-CBC
-        let plaintext = "abcdefghijklmnop".as_bytes();
+        let plaintext = "ABCDEFGHIJKLMNOP".as_bytes();
         let key = "YELLOW SUBMARINE".as_bytes();
-        let iv = vec!['\x00' as u8; 16];
+        let iv = vec![0; 16];
         assert_eq!(
             plaintext,
-            &decrypt_aes_128_cbc(&encrypt_aes_128_cbc(&plaintext, &key, &iv), &key, &iv)
+            &decrypt_aes_128_cbc(
+                &encrypt_aes_128_cbc(&plaintext, &key, &iv).unwrap(),
+                &key,
+                &iv
+            )
+            .unwrap()
         );
     }
 
@@ -173,6 +200,7 @@ mod tests {
         let buf = utils::from_base64(&body).unwrap();
         let key = "YELLOW SUBMARINE".as_bytes();
         let iv = vec!['\x00' as u8; 16];
-        //println!("{}", String::from_utf8_lossy(&decrypt_aes_128_cbc(&buf, &key, &iv)));
+        let plaintext = Vec::from("I\'m back and I\'m ringin\' the bell \nA rockin\' on the mike while the fly girls yell \nIn ecstasy in the back of me \nWell that\'s my DJ Deshay cuttin\' all them Z\'s \nHittin\' hard and the girlies goin\' crazy \nVanilla\'s on the mike, man I\'m not lazy. \n\nI\'m lettin\' my drug kick in \nIt controls my mouth and I begin \nTo just let it flow, let my concepts go \nMy posse\'s to the side yellin\', Go Vanilla Go! \n\nSmooth \'cause that\'s the way I will be \nAnd if you don\'t give a damn, then \nWhy you starin\' at me \nSo get off \'cause I control the stage \nThere\'s no dissin\' allowed \nI\'m in my own phase \nThe girlies sa y they love me and that is ok \nAnd I can dance better than any kid n\' play \n\nStage 2 -- Yea the one ya\' wanna listen to \nIt\'s off my head so let the beat play through \nSo I can funk it up and make it sound good \n1-2-3 Yo -- Knock on some wood \nFor good luck, I like my rhymes atrocious \nSupercalafragilisticexpialidocious \nI\'m an effect and that you can bet \nI can take a fly girl and make her wet. \n\nI\'m like Samson -- Samson to Delilah \nThere\'s no denyin\', You can try to hang \nBut you\'ll keep tryin\' to get my style \nOver and over, practice makes perfect \nBut not if you\'re a loafer. \n\nYou\'ll get nowhere, no place, no time, no girls \nSoon -- Oh my God, homebody, you probably eat \nSpaghetti with a spoon! Come on and say it! \n\nVIP. Vanilla Ice yep, yep, I\'m comin\' hard like a rhino \nIntoxicating so you stagger like a wino \nSo punks stop trying and girl stop cryin\' \nVanilla Ice is sellin\' and you people are buyin\' \n\'Cause why the freaks are jockin\' like Crazy Glue \nMovin\' and groovin\' trying to sing along \nAll through the ghetto groovin\' this here song \nNow you\'re amazed by the VIP posse. \n\nSteppin\' so hard like a German Nazi \nStartled by the bases hittin\' ground \nThere\'s no trippin\' on mine, I\'m just gettin\' down \nSparkamatic, I\'m hangin\' tight like a fanatic \nYou trapped me once and I thought that \nYou might have it \nSo step down and lend me your ear \n\'89 in my time! You, \'90 is my year. \n\nYou\'re weakenin\' fast, YO! and I can tell it \nYour body\'s gettin\' hot, so, so I can smell it \nSo don\'t be mad and don\'t be sad \n\'Cause the lyrics belong to ICE, You can call me Dad \nYou\'re pitchin\' a fit, so step back and endure \nLet the witch doctor, Ice, do the dance to cure \nSo come up close and don\'t be square \nYou wanna battle me -- Anytime, anywhere \n\nYou thought that I was weak, Boy, you\'re dead wrong \nSo come on, everybody and sing this song \n\nSay -- Play that funky music Say, go white boy, go white boy go \nplay that funky music Go white boy, go white boy, go \nLay down and boogie and play that funky music till you die. \n\nPlay that funky music Come on, Come on, let me hear \nPlay that funky music white boy you say it, say it \nPlay that funky music A little louder now \nPlay that funky music, white boy Come on, Come on, Come on \nPlay that funky music \n");
+        assert_eq!(plaintext, decrypt_aes_128_cbc(&buf, &key, &iv).unwrap());
     }
 }

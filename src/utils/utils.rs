@@ -32,7 +32,7 @@ pub fn from_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     base64::decode(s)
 }
 
-fn to_base64(input: Vec<u8>) -> String {
+pub fn to_base64(input: Vec<u8>) -> String {
     base64::encode(input)
 }
 
@@ -163,18 +163,30 @@ fn u32_hamming_distance(a: u32, b: u32) -> u32 {
 }
 
 pub trait Padding {
-    fn pad(&mut self, k: u8);
+    fn pad_inplace(&mut self, k: u8);
+    fn pad(&self, k: u8) -> Vec<u8>;
+    fn unpad_inplace(&mut self);
 }
 
 impl Padding for Vec<u8> {
     // https://www.rfc-editor.org/rfc/rfc5652.html
-    fn pad(&mut self, k: u8) {
+    fn pad_inplace(&mut self, k: u8) {
         let l: usize = self.len();
         let padding = k - (l % k as usize) as u8;
 
         for _ in 0..padding {
             self.push(padding);
         }
+    }
+
+    fn pad(&self, k: u8) -> Vec<u8> {
+        let mut value: Vec<u8> = self.to_vec();
+        value.pad_inplace(k);
+        value
+    }
+
+    fn unpad_inplace(&mut self) {
+        self.truncate(self.len() - self[self.len() - 1] as usize);
     }
 }
 
@@ -278,8 +290,9 @@ mod tests {
     fn pkcs7_padding_challenge() {
         // Implement PKCS#7 padding
         // https://cryptopals.com/sets/2/challenges/9
-        let mut res = Vec::from("YELLOW SUBMARINE");
-        res.pad(20);
-        assert_eq!("YELLOW SUBMARINE\x04\x04\x04\x04".as_bytes(), res);
+        assert_eq!(
+            "YELLOW SUBMARINE\x04\x04\x04\x04".as_bytes(),
+            Vec::from("YELLOW SUBMARINE").pad(20)
+        );
     }
 }
