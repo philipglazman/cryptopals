@@ -14,6 +14,31 @@ enum Mode {
     CBC,
 }
 
+struct BrokenOracle {
+    key: Vec<u8>,
+    mode: Mode,
+}
+
+impl BrokenOracle {
+    fn new(mode: Mode) -> BrokenOracle {
+        return BrokenOracle {
+            key: gen_16_byte(),
+            mode: mode,
+        };
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut unknown_string = utils::from_base64("Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK").unwrap();
+        let mut plaintext = plaintext.to_vec();
+        plaintext.append(&mut unknown_string);
+
+        match self.mode {
+            Mode::ECB => encrypt_aes_128_ecb(&plaintext, &self.key),
+            _ => Err(Error::InvalidMode),
+        }
+    }
+}
+
 fn encryption_oracle(plaintext: &[u8]) -> Result<(Vec<u8>, Mode), Error> {
     // append 5-10 bytes (count chosen randomly) before the plaintext and 5-10 bytes after the plaintext
     let prepend_len = rand::thread_rng().gen_range(5..11);
@@ -163,13 +188,14 @@ fn detect_ecb(ciphertext: &[u8]) -> bool {
 pub enum Error {
     InvalidIVLength,
     InvalidBlockLength,
+    InvalidMode,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utils::{self, Padding};
-    use std::io::BufRead;
+    use std::{borrow::Borrow, io::BufRead};
 
     #[test]
     fn decrypt_aes_ecb_challenge() {
@@ -269,5 +295,80 @@ mod tests {
                 false => assert_eq!(Mode::CBC, res.1),
             }
         }
+    }
+
+    #[test]
+    fn ecb_decryption_challenge() {
+        // Byte-at-a-time ECB decryption (Simple)
+        // https://cryptopals.com/sets/2/challenges/12
+        let oracle = BrokenOracle::new(Mode::ECB);
+
+        let plaintext = "AAAAAAAAAAAAAAAA".as_bytes();
+
+        let mut block_size = 0;
+
+        // 1. Feed identical bytes of your-string to the function 1 at a time.
+        for idx in 0..plaintext.len() {
+            let plaintext = &plaintext[..idx];
+            let ciphertext = oracle.encrypt(plaintext).unwrap();
+            let new_block_size = ciphertext.len();
+
+            if block_size > 0 && (new_block_size - block_size) > block_size {
+                break;
+            }
+
+            if block_size < new_block_size {
+                block_size = new_block_size - block_size;
+            }
+            // todo: get block size (16)
+        }
+
+        assert_eq!(16, block_size);
+
+        // 2. Detect that the function is using ECB.
+        {
+            let plaintext = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".as_bytes();
+            assert_eq!(true, detect_ecb(&oracle.encrypt(&plaintext).unwrap()));
+        }
+
+        // 3. Knowing the block size, craft an input block that is exactly 1 byte short.
+        // find_byte cycles through possible byte values and checks if the given plaintext + byte
+        // is equal to the previous ciphertext.
+        let find_byte = |plaintext: &[u8], ciphertext: &[u8], recovered: &[u8]| {
+            for byte in 0..255 {
+                let mut plaintext = plaintext.to_vec();
+                plaintext.extend_from_slice(&recovered);
+                plaintext.extend_from_slice(&[byte as u8]);
+
+                let output = oracle.encrypt(&plaintext).unwrap();
+
+                // 5. Match the output of the one-byte-short input.
+                if output[..block_size * 9] == ciphertext[..block_size * 9] {
+                    return Some(byte as u8);
+                }
+            }
+            return None;
+        };
+
+        let mut plaintext = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".as_bytes().to_vec();
+        assert_eq!(block_size * 9, plaintext.len());
+        let mut ciphertext = oracle.encrypt(&plaintext).unwrap();
+        let mut recovered_string: Vec<u8> = Vec::new();
+        for _byte in 0..block_size * 9 {
+            plaintext.pop();
+            ciphertext = oracle.encrypt(&plaintext).unwrap();
+
+            // 6. Repeat for the next byte.
+            let found = find_byte(&plaintext, &ciphertext, &recovered_string);
+
+            if found.is_some() {
+                recovered_string.push(found.unwrap());
+            }
+        }
+
+        recovered_string.unpad_inplace();
+
+        let unknown_string = utils::from_base64("Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK").unwrap();
+        assert_eq!(unknown_string, recovered_string);
     }
 }
